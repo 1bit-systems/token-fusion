@@ -1,4 +1,11 @@
-"""All 14 Fusion Pipeline stages."""
+"""All Fusion Pipeline stages.
+
+NOTES:
+ - Abbrev and TokenOpt stages exist but are NOT in the default pipeline.
+   They save <5 tokens on typical content — irrelevant at modern context windows.
+   Include explicitly if you need micro-optimization for high-volume short prompts.
+ - Neurosyntax NEVER strips comments or docstrings. Comments carry intent.
+"""
 
 from .quantum_lock import QuantumLockStage
 from .cortex import CortexStage
@@ -32,6 +39,24 @@ __all__ = [
     "AbbrevStage",
 ]
 
+# Default pipeline: stages that provide meaningful token reduction.
+# Abbrev and TokenOpt excluded — they save <5 tokens on typical content.
+DEFAULT_STAGES = [
+    QuantumLockStage,
+    CortexStage,
+    PhotonStage,
+    RLEStage,
+    SemanticDedupStage,
+    IonizerStage,
+    LogCrunchStage,
+    SearchCrunchStage,
+    DiffCrunchStage,
+    StructuralCollapseStage,
+    NeurosyntaxStage,
+    NexusStage,
+]
+
+# All stages including micro-optimizations
 ALL_STAGES = [
     QuantumLockStage,
     CortexStage,

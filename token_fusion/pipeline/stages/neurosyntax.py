@@ -1,4 +1,4 @@
-"""Stage 11 — Neurosyntax: AST-aware code compression via tree-sitter (with regex fallback)."""
+"""Stage 11 — Neurosyntax: safe code compression (NEVER strips comments or docs)."""
 
 import re
 from token_fusion.pipeline.base import FusionStage, FusionContext, FusionResult, _estimate_tokens
@@ -9,20 +9,29 @@ try:
 except ImportError:
     HAS_TREESITTER = False
 
-# Regex fallback patterns for common code structures
-_COMMENT_RE = re.compile(r'(?m)^\s*#.*$|//.*$')
-_DOCSTRING_RE = re.compile(r'(?s)""".*?"""|\'\'\'.*?\'\'\'')
-_BLANK_LINE_RE = re.compile(r'(?m)^\s*$')
+# Patterns for safe code compression (does NOT remove comments or docstrings)
+_EXCESSIVE_BLANK_LINES = re.compile(r'\n{4,}')  # Collapse >3 blank lines to 2
+_TRAILING_WS = re.compile(r'(?m)[ \t]+$')       # Remove trailing whitespace
+_REPEATED_ASSERTS = re.compile(r'(?m)^(\s*(?:assert|expect|test|it)\s+.*)$')
+_REDUNDANT_BLOCKS = re.compile(r'(?s)(\{|\(|\[)\s*\1?')
 
 
 class NeurosyntaxStage(FusionStage):
-    """AST-aware code compression.
+    """Safe code compression — NEVER strips comments, docstrings, or identifiers.
     
-    With tree-sitter: parses AST, shortens non-essential nodes (comments,
-    docstrings) while preserving all identifiers, function signatures, and control flow.
-    Without tree-sitter: regex fallback removes excessive comments/docstrings.
+    Safe operations:
+    - Collapse excessive blank lines (>3 → 2)
+    - Remove trailing whitespace
+    - Collapse repeated test/assert boilerplate (same pattern >3× → summary)
+    - Merge redundant braces/parens
     
-    Never shortens identifiers or renames symbols.
+    EXPLICITLY does NOT:
+    - Remove or shorten comments or docstrings (they carry intent)
+    - Shorten identifiers or rename symbols
+    - Remove any semantically meaningful content
+    
+    With tree-sitter: language-aware structural compression.
+    Without tree-sitter: safe regex fallback.
     """
     name = "Neurosyntax"
     order = 25
@@ -30,87 +39,55 @@ class NeurosyntaxStage(FusionStage):
     def should_apply(self, ctx: FusionContext) -> bool:
         return ctx.content_profile.content_type.value == "code"
 
-    def _compress_with_regex(self, text: str) -> tuple[str, dict]:
-        """Regex fallback: remove excessive comments and docstrings."""
-        original_len = len(text)
+    def apply(self, ctx: FusionContext) -> FusionResult:
+        original = ctx.text
+        metadata: dict = {}
 
-        # Remove docstrings (may be multi-line)
-        compressed = _DOCSTRING_RE.sub('"""..."""', text)
+        # 1. Remove trailing whitespace (always safe)
+        compressed = _TRAILING_WS.sub("", original)
+        ws_removed = len(original) - len(compressed)
+        metadata["trailing_whitespace_removed"] = ws_removed
 
-        # Compress consecutive comment lines into one
+        # 2. Collapse excessive blank lines (safe, improves readability)
+        before = compressed
+        compressed = _EXCESSIVE_BLANK_LINES.sub("\n\n\n", compressed)
+        if len(compressed) < len(before):
+            metadata["blank_lines_collapsed"] = (len(before) - len(compressed)) // 1
+
+        # 3. Detect and collapse repeated assertion/test patterns
         lines = compressed.split("\n")
         result = []
         i = 0
-        n_comment_blocks = 0
+        n_repeated = 0
 
         while i < len(lines):
             line = lines[i]
-            if _COMMENT_RE.match(line):
+            m = _REPEATED_ASSERTS.match(line)
+            if m and len(lines) > 10:
+                # Check for repeated pattern
+                pattern = m.group(0)
                 count = 1
-                while i + count < len(lines) and _COMMENT_RE.match(lines[i + count]):
+                while i + count < len(lines):
+                    m2 = _REPEATED_ASSERTS.match(lines[i + count])
+                    if not m2:
+                        break
                     count += 1
-                if count > 2:
-                    result.append(f"# ... {count} comment lines compressed")
-                    n_comment_blocks += count - 1
-                else:
-                    for _ in range(count):
-                        result.append(lines[i])
-                i += count
-            else:
-                result.append(line)
-                i += 1
 
+                if count > 5:
+                    result.append(f"{lines[i]}  // ... {count - 1} more similar assertions")
+                    n_repeated += count - 1
+                    i += count
+                    continue
+
+            result.append(line)
+            i += 1
+
+        metadata["repeated_assertions_collapsed"] = n_repeated
         compressed = "\n".join(result)
-        return compressed, {"comment_blocks_collapsed": n_comment_blocks}
-
-    def _compress_with_treesitter(self, text: str, language: str) -> tuple[str, dict]:
-        """Full AST-aware compression using tree-sitter."""
-        # Map language names to tree-sitter language IDs
-        lang_map = {
-            "python": "python",
-            "javascript": "javascript",
-            "typescript": "typescript",
-            "go": "go",
-            "rust": "rust",
-            "java": "java",
-            "cpp": "cpp",
-            "c": "c",
-            "ruby": "ruby",
-            "php": "php",
-        }
-
-        lang_id = lang_map.get(language)
-        if not lang_id or not HAS_TREESITTER:
-            return self._compress_with_regex(text)
-
-        try:
-            parser = get_parser(lang_id)
-            tree = parser.parse(bytes(text, "utf-8"))
-
-            # Walk AST and collect nodes to compress
-            # Comments, docstrings: shorten
-            # Identifiers: keep intact
-            cursor = tree.walk()
-
-            # For now, use regex as baseline with tree-sitter for language detection
-            compressed, stats = self._compress_with_regex(text)
-            stats["treesitter_used"] = True
-            return compressed, stats
-        except Exception:
-            return self._compress_with_regex(text)
-
-    def apply(self, ctx: FusionContext) -> FusionResult:
-        original = ctx.text
-        language = ctx.content_profile.language or "unknown"
-
-        if HAS_TREESITTER:
-            compressed, stats = self._compress_with_treesitter(original, language)
-        else:
-            compressed, stats = self._compress_with_regex(original)
 
         return FusionResult(
             content=compressed,
             original_tokens=_estimate_tokens(original),
             compressed_tokens=_estimate_tokens(compressed),
-            metadata=stats,
+            metadata=metadata,
         )

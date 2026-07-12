@@ -16,7 +16,7 @@ def test_basic_compress():
     assert "stats" in result
     assert result["stats"]["original_tokens"] > 0
     assert result["stats"]["compressed_tokens"] > 0
-    print(f"  Basic compress: {result['stats']['original_tokens']} → {result['stats']['compressed_tokens']} tokens ({result['stats']['reduction_pct']:.1f}%)")
+    print(f"  Basic compress: {result['stats']['original_tokens']} -> {result['stats']['compressed_tokens']} tokens ({result['stats']['reduction_pct']:.1f}%)")
 
 
 def test_json_compression():
@@ -29,22 +29,20 @@ def test_json_compression():
     result = engine.compress(json_str, content_type="json")
     
     reduction = result["stats"]["reduction_pct"]
-    print(f"  JSON compression: {result['stats']['original_tokens']} → {result['stats']['compressed_tokens']} tokens ({reduction:.1f}%)")
-    assert reduction > 10, f"Expected >10% reduction for JSON, got {reduction:.1f}%"
-    # Content should be shorter than original or contain compression markers
-    assert len(result["compressed"]) < len(json_str) or "//" in result["compressed"] or "..." in result["compressed"], "Expected compression"
+    print(f"  JSON compression: {result['stats']['original_tokens']} -> {result['stats']['compressed_tokens']} tokens ({reduction:.1f}%)")
+    assert reduction > 50, f"Expected >50% reduction for JSON, got {reduction:.1f}%"
+    assert len(result["compressed"]) < len(json_str) or "more items" in result["compressed"], "Expected compression"
 
 
 def test_log_compression():
-    """Log content should get LogCrunch folding."""
+    """Log content should get reduced."""
     log = "2024-01-01 10:00:00 INFO starting\n" * 50
     engine = FusionEngine()
     result = engine.compress(log, content_type="log")
     
     reduction = result["stats"]["reduction_pct"]
-    print(f"  Log compression: {result['stats']['original_tokens']} → {result['stats']['compressed_tokens']} tokens ({reduction:.1f}%)")
-    assert reduction > 50, f"Expected >50% reduction for repeated logs, got {reduction:.1f}%"
-    assert reduction > 80, f"Expected very high reduction for repeated logs, got {reduction:.1f}%"
+    print(f"  Log compression: {result['stats']['original_tokens']} -> {result['stats']['compressed_tokens']} tokens ({reduction:.1f}%)")
+    assert reduction > 80, f"Expected >80% reduction for repeated logs, got {reduction:.1f}%"
 
 
 def test_rewind_store():
@@ -58,7 +56,6 @@ def test_rewind_store():
     retrieved = store.retrieve(mid)
     assert retrieved == original, f"Rewind roundtrip failed: {retrieved} != {original}"
     
-    # Parse marker
     parsed = store.parse_marker(marker)
     assert parsed == mid, f"Marker parse failed: {parsed} != {mid}"
     print(f"  RewindStore: stored/retrieved {len(original)} chars, marker={marker}")
@@ -73,14 +70,18 @@ def test_rewind_compress():
     
     assert "markers" in result, "Expected rewind markers"
     assert len(result["markers"]) > 0, "Expected at least one marker"
-    print(f"  Rewind compress: {result['stats']['original_tokens']} → {result['stats']['compressed_tokens']} tokens")
-    print(f"  Markers stored: {len(result['markers'])}")
+    # Verify roundtrip
+    mid = result["markers"][0]["id"]
+    original = engine.rewind_store.retrieve(mid)
+    assert original == large_json, "Rewind roundtrip failed"
+    print(f"  Rewind compress: {result['stats']['original_tokens']} -> {result['stats']['compressed_tokens']} tokens")
+    print(f"  Rewind OK: {len(result['markers'])} markers, {len(original)} chars retrievable")
 
 
 def test_messages_compress():
     """Multi-message compression should work."""
     messages = [
-        {"role": "system", "content": "You are a helpful coding assistant. You help users by writing clean, well-documented code."},
+        {"role": "system", "content": "You are a helpful coding assistant."},
         {"role": "user", "content": "Write a Python function that computes fibonacci numbers."},
         {"role": "assistant", "content": "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        yield a\n        a, b = b, a + b"},
     ]
@@ -91,23 +92,22 @@ def test_messages_compress():
     assert "per_message" in result
     assert "stats" in result
     assert len(result["per_message"]) == 3
-    
-    total_reduction = result["stats"]["total_reduction_pct"]
-    print(f"  Message compression: {result['stats']['total_original_tokens']} → {result['stats']['total_compressed_tokens']} tokens ({total_reduction:.1f}%)")
+    print(f"  Message compression: {result['stats']['total_original_tokens']} -> {result['stats']['total_compressed_tokens']} tokens ({result['stats']['total_reduction_pct']:.1f}%)")
 
 
-def test_abbrev_skips_code():
-    """Abbrev should NOT fire on code content."""
+def test_micro_opt_excluded():
+    """Abbrev and TokenOpt should not be in the default pipeline."""
     engine = FusionEngine()
-    code = 'def calculate_configuration():\n    with open("/etc/config") as f:\n        return f.read()'
+    stage_names = [s.name for s in engine.pipeline]
+    assert "Abbrev" not in stage_names, "Abbrev is snake oil, excluded by default"
+    assert "TokenOpt" not in stage_names, "TokenOpt is snake oil, excluded by default"
     
-    result = engine.compress(code, content_type="code")
-    # "configuration" and "with" should not be abbreviated in code
-    assert "config" not in result["compressed"].split("#")[0] or "config" in code  # identifier context ok
-    
-    text = "The configuration file with the application should be approximately correct."
-    result2 = engine.compress(text, content_type="text")
-    print(f"  Text abbreviation: {text} → {result2['compressed']}")
+    engine2 = FusionEngine(include_micro_opt=True)
+    stage_names2 = [s.name for s in engine2.pipeline]
+    assert "Abbrev" in stage_names2
+    assert "TokenOpt" in stage_names2
+    print(f"  Default stages: {len(stage_names)} (Abbrev/TokenOpt excluded)")
+    print(f"  Full stages: {len(stage_names2)} (micro-optimizations included)")
 
 
 def test_content_detection():
@@ -145,18 +145,18 @@ def test_custom_stage():
     
     result = engine.compress("hello world", content_type="text")
     assert "HELLO" in result["compressed"], "Custom stage should have run"
-    print(f"  Custom stage: input='hello world' → output='{result['compressed']}'")
+    print(f"  Custom stage: input='hello world' -> output='{result['compressed']}'")
 
 
 if __name__ == "__main__":
-    print("\n=== Pipeline Tests (Option A) ===\n")
+    print("\n=== Pipeline Tests ===\n")
     test_basic_compress()
     test_json_compression()
     test_log_compression()
     test_rewind_store()
     test_rewind_compress()
     test_messages_compress()
-    test_abbrev_skips_code()
+    test_micro_opt_excluded()
     test_content_detection()
     test_custom_stage()
-    print("\n✓ All pipeline tests passed!\n")
+    print("\nAll pipeline tests passed!\n")

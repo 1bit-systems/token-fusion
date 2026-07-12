@@ -11,7 +11,7 @@ print("=" * 65)
 
 # ─── Option A: Pipeline ─────────────────────────────────────
 print("\n" + "─" * 65)
-print("  A) FUSION PIPELINE — 14-Stage Token Compression")
+print("  A) FUSION PIPELINE — Algorithmic Token Compression")
 print("─" * 65)
 
 from token_fusion.pipeline import FusionEngine

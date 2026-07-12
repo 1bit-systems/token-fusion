@@ -8,13 +8,17 @@ from token_fusion.pipeline.base import (
     FusionStage, FusionContext, FusionResult, _estimate_tokens,
 )
 from token_fusion.pipeline.rewind import RewindStore
-from token_fusion.pipeline.stages import ALL_STAGES
+from token_fusion.pipeline.stages import ALL_STAGES, DEFAULT_STAGES
 from token_fusion.utils.content_type import detect as detect_content, ContentProfile, ContentType
 from token_fusion.utils.token_counter import estimate_tokens
 
 
 class FusionEngine:
-    """The 14-stage Fusion Pipeline orchestrator.
+    """The Fusion Pipeline orchestrator.
+    
+    Uses 12 default stages that provide meaningful token reduction.
+    Abbrev and TokenOpt stages exist but save <5 tokens on typical content
+    and are excluded by default. Enable with include_micro_opt=True.
     
     Usage:
         engine = FusionEngine()
@@ -31,8 +35,14 @@ class FusionEngine:
         stages: Optional[list[FusionStage]] = None,
         enable_rewind: bool = False,
         rewind_max_entries: int = 10_000,
+        include_micro_opt: bool = False,
     ):
-        self._stages = stages or [cls() for cls in ALL_STAGES]
+        if stages is not None:
+            self._stages = stages
+        elif include_micro_opt:
+            self._stages = [cls() for cls in ALL_STAGES]
+        else:
+            self._stages = [cls() for cls in DEFAULT_STAGES]
         self._stages.sort(key=lambda s: s.order)
         self.rewind_store = RewindStore(max_entries=rewind_max_entries) if enable_rewind else None
         self._enable_rewind = enable_rewind

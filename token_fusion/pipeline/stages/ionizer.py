@@ -4,8 +4,8 @@ import json
 import re
 from token_fusion.pipeline.base import FusionStage, FusionContext, FusionResult, _estimate_tokens
 
-_ARRAY_RE = re.compile(r'\[\s*\{.*?\}\s*\]', re.DOTALL)
-_JSON_OBJECT_RE = re.compile(r'\{[^}]*\}')
+# Parse JSON by trying json.loads first, falling back to regex for inline arrays
+# Regex-only approaches fail on nested brackets — always prefer json.loads
 
 _MAX_SAMPLE = 5  # max items per array to keep
 _MIN_SAMPLE = 2
@@ -25,47 +25,119 @@ class IonizerStage(FusionStage):
         return ctx.content_profile.content_type.value == "json" and len(ctx.text) > 300
 
     def apply(self, ctx: FusionContext) -> FusionResult:
-        original = ctx.text
+        original = ctx.text.strip()
         n_arrays_sampled = 0
         n_items_omitted = 0
 
-        def _sample_array(m: re.Match) -> str:
-            nonlocal n_arrays_sampled, n_items_omitted
-            try:
-                array = json.loads(m.group(0))
-                if not isinstance(array, list) or len(array) <= _MAX_SAMPLE:
-                    return m.group(0)
+        # Try parsing the entire text as JSON
+        try:
+            parsed = json.loads(original)
+        except (json.JSONDecodeError, ValueError):
+            # Not parseable as JSON — pass through
+            return FusionResult(
+                content=original,
+                original_tokens=_estimate_tokens(original),
+                compressed_tokens=_estimate_tokens(original),
+                metadata={"error": "not_parseable_json"},
+            )
 
-                n_arrays_sampled += 1
-                total = len(array)
+        if isinstance(parsed, list) and len(parsed) > _MAX_SAMPLE:
+            # Compress the top-level array
+            total = len(parsed)
+            n_arrays_sampled = 1
 
-                # Keep first, last, and evenly spaced samples
-                if total <= _MAX_SAMPLE + 2:
-                    sample = array
-                else:
-                    indices = set()
-                    indices.add(0)
-                    indices.add(total - 1)
+            if total <= _MAX_SAMPLE + 2:
+                sample = parsed
+            else:
+                # Keep: first, last, and evenly spaced samples
+                indices = set()
+                indices.add(0)
+                indices.add(total - 1)
+                if _MAX_SAMPLE > 2:
                     step = (total - 2) / (_MAX_SAMPLE - 2)
                     for i in range(1, _MAX_SAMPLE - 1):
                         indices.add(int(i * step))
-                    indices = sorted(indices)
-                    sample = [array[i] for i in indices]
+                indices = sorted(indices)
+                sample = [parsed[i] for i in indices]
 
-                n_items_omitted += total - len(sample)
-                sampled = json.dumps(sample, indent=2)
-                return f"{sampled}\n  // ... {total - len(sample)} more items (Ionizer sampled {len(sample)}/{total})"
-            except (json.JSONDecodeError, ValueError):
-                return m.group(0)
+            n_items_omitted = total - len(sample)
+            compressed = (
+                json.dumps(sample, indent=2, default=str) +
+                f"\n// ... {n_items_omitted} more items "
+                f"(Ionizer sampled {len(sample)}/{total})"
+            )
 
-        compressed = _ARRAY_RE.sub(_sample_array, original)
+            return FusionResult(
+                content=compressed,
+                original_tokens=_estimate_tokens(original),
+                compressed_tokens=_estimate_tokens(compressed),
+                metadata={
+                    "arrays_sampled": n_arrays_sampled,
+                    "items_omitted": n_items_omitted,
+                },
+            )
 
+        if isinstance(parsed, dict):
+            # Walk recursively for nested arrays
+            compressed, stats = self._compress_nested(parsed)
+            return FusionResult(
+                content=json.dumps(compressed, indent=2, default=str) if not isinstance(compressed, str) else compressed,
+                original_tokens=_estimate_tokens(original),
+                compressed_tokens=_estimate_tokens(json.dumps(compressed, default=str) if not isinstance(compressed, str) else compressed),
+                metadata=stats,
+            )
+
+        # Not an array or dict — pass through
         return FusionResult(
-            content=compressed,
+            content=original,
             original_tokens=_estimate_tokens(original),
-            compressed_tokens=_estimate_tokens(compressed),
-            metadata={
-                "arrays_sampled": n_arrays_sampled,
-                "items_omitted": n_items_omitted,
-            },
+            compressed_tokens=_estimate_tokens(original),
+            metadata={"reason": "not_sampled"},
         )
+
+    def _compress_nested(self, obj, depth=0):
+        """Recursively compress nested JSON arrays."""
+        stats = {"arrays_sampled": 0, "items_omitted": 0}
+        if depth > 5:
+            return obj, stats
+
+        if isinstance(obj, dict):
+            result = {}
+            for k, v in obj.items():
+                if isinstance(v, (list, dict)):
+                    compressed, sub_stats = self._compress_nested(v, depth + 1)
+                    result[k] = compressed
+                    stats["arrays_sampled"] += sub_stats.get("arrays_sampled", 0)
+                    stats["items_omitted"] += sub_stats.get("items_omitted", 0)
+                else:
+                    result[k] = v
+            return result, stats
+
+        if isinstance(obj, list) and len(obj) > _MAX_SAMPLE:
+            total = len(obj)
+            stats["arrays_sampled"] += 1
+
+            indices = set()
+            indices.add(0)
+            indices.add(total - 1)
+            if _MAX_SAMPLE > 2:
+                step = (total - 2) / (_MAX_SAMPLE - 2)
+                for i in range(1, _MAX_SAMPLE - 1):
+                    indices.add(int(i * step))
+            indices = sorted(indices)
+
+            sample = []
+            for i in indices:
+                item = obj[i]
+                if isinstance(item, (dict, list)):
+                    compressed, sub_stats = self._compress_nested(item, depth + 1)
+                    sample.append(compressed)
+                    stats["arrays_sampled"] += sub_stats.get("arrays_sampled", 0)
+                    stats["items_omitted"] += sub_stats.get("items_omitted", 0)
+                else:
+                    sample.append(item)
+
+            stats["items_omitted"] += total - len(sample)
+            return sample, stats
+
+        return obj, stats
