@@ -1,0 +1,35 @@
+[project]
+name = "token-fusion"
+version = "0.1.0"
+description = "Unified token fusion library — pipeline compression, learned token merging, and agent context optimization"
+authors = [{name = "Token Fusion Team"}]
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dynamic = ["dependencies"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backports_legacy"
+
+[tool.setuptools.packages.find]
+include = ["token_fusion*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[project.optional-dependencies]
+ml = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "numpy>=1.24",
+]
+accurate = ["tiktoken>=0.5"]
+ast = ["tree-sitter-language-pack>=0.3"]
+dev = ["pytest>=7", "pytest-cov>=4", "black>=23", "ruff>=0.1"]
+all = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "numpy>=1.24",
+    "tiktoken>=0.5",
+    "pytest>=7",
+]
